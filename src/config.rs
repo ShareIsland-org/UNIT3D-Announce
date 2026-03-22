@@ -94,6 +94,13 @@ pub struct Config {
     /// if not using a reverse proxy. A reverse proxy is required if listening
     /// on unix sockets.
     pub reverse_proxy_client_ip_header_name: Option<String>,
+    /// Se configurato, il connectivity check viene delegato a questo Cloudflare
+    /// Worker URL invece di usare una connessione TCP diretta dal server.
+    /// Formato: https://check.shareisland.org/check
+    pub connectivity_check_worker_url: Option<String>,
+    /// Chiave segreta per autenticarsi al Cloudflare Worker di connectivity check.
+    /// Deve corrispondere al segreto CONNECTIVITY_CHECK_KEY configurato nel Worker.
+    pub connectivity_check_worker_key: Option<String>,
     /// The max amount of peer lists containing seeds a user is allowed to
     /// receive per time window (in seconds). The rate is calculated using an
     /// exponential decay model. If a user requests peer lists faster than
@@ -272,6 +279,9 @@ impl Config {
         let reverse_proxy_client_ip_header_name =
             env::var("REVERSE_PROXY_CLIENT_IP_HEADER_NAME").ok();
 
+        let connectivity_check_worker_url = env::var("CONNECTIVITY_CHECK_WORKER_URL").ok();
+        let connectivity_check_worker_key = env::var("CONNECTIVITY_CHECK_WORKER_KEY").ok();
+
         if listening_unix_socket.is_some() {
             ensure!(
                 reverse_proxy_client_ip_header_name.is_some(),
@@ -371,6 +381,8 @@ impl Config {
             require_peer_connectivity,
             is_announce_logging_enabled,
             reverse_proxy_client_ip_header_name,
+            connectivity_check_worker_url,
+            connectivity_check_worker_key,
             user_receive_seed_list_rate_limits,
             user_receive_leech_list_rate_limits,
             donor_immunity_override,

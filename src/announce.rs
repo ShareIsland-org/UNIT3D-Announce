@@ -996,16 +996,64 @@ async fn check_connectivity(state: &Arc<AppState>, ip: IpAddr, port: u16) -> boo
             }
         }
 
-        let connectable = tokio::spawn(async move {
-            tokio::time::timeout(
-                std::time::Duration::from_millis(500),
-                TcpStream::connect(socket),
+        let (worker_url, worker_key) = {
+            let config = state.config.load();
+            (
+                config.connectivity_check_worker_url.clone(),
+                config.connectivity_check_worker_key.clone(),
             )
-            .await
-            .is_ok_and(|connection_result| connection_result.is_ok())
-        })
-        .await
-        .unwrap_or(false);
+        };
+
+        let connectable = match (worker_url, worker_key) {
+            (Some(url), Some(key)) => {
+                // Connectivity check via Cloudflare Worker anziche dal server Hetzner.
+                // Gli IP Cloudflare non sono bloccati dai VPN provider che filtrano
+                // connessioni in ingresso da datacenter (AS24940 Hetzner).
+                #[derive(serde::Deserialize)]
+                struct WorkerResponse {
+                    connectable: bool,
+                }
+                let request_url = format!("{}?ip={}&port={}&key={}", url, ip, port, key);
+                match reqwest::Client::new()
+                    .get(&request_url)
+                    .timeout(std::time::Duration::from_secs(5))
+                    .send()
+                    .await
+                {
+                    Ok(response) if response.status().is_success() => response
+                        .json::<WorkerResponse>()
+                        .await
+                        .map(|r| r.connectable)
+                        .unwrap_or(false),
+                    // Worker non raggiungibile o rate-limited: fallback a TCP diretto.
+                    // Cosi il flag degrada a comportamento pre-Worker invece di
+                    // segnare tutti come not-connectable in caso di problemi CF.
+                    _ => tokio::spawn(async move {
+                        tokio::time::timeout(
+                            std::time::Duration::from_millis(500),
+                            TcpStream::connect(socket),
+                        )
+                        .await
+                        .is_ok_and(|connection_result| connection_result.is_ok())
+                    })
+                    .await
+                    .unwrap_or(false),
+                }
+            }
+            _ => {
+                // Worker non configurato: TCP diretto dal server.
+                tokio::spawn(async move {
+                    tokio::time::timeout(
+                        std::time::Duration::from_millis(500),
+                        TcpStream::connect(socket),
+                    )
+                    .await
+                    .is_ok_and(|connection_result| connection_result.is_ok())
+                })
+                .await
+                .unwrap_or(false)
+            }
+        };
 
         state
             .stores

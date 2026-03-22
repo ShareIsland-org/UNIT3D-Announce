@@ -18,6 +18,7 @@ rayon = "1.11.0"
 ringmap = "0.2.3"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_bytes = "0.11.19"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde_repr = "0.1.20"
 sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "macros", "mysql", "chrono"] }
 thiserror = "2.0.18"
