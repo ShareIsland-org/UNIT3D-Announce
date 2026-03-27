@@ -15,7 +15,10 @@ use std::{
     str::FromStr,
     sync::Arc,
 };
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 use crate::{
     error::AnnounceError::{
@@ -364,7 +367,8 @@ pub async fn announce(
 
     let torrent_id = torrent_id_res?;
 
-    let is_connectable = check_connectivity(&state, client_ip, queries.port).await;
+    let is_connectable =
+        check_connectivity(&state, client_ip, queries.port, queries.info_hash).await;
 
     let mut warnings = WarningCollection::new();
 
@@ -980,7 +984,12 @@ pub async fn announce(
     Ok(response)
 }
 
-async fn check_connectivity(state: &Arc<AppState>, ip: IpAddr, port: u16) -> bool {
+async fn check_connectivity(
+    state: &Arc<AppState>,
+    ip: IpAddr,
+    port: u16,
+    infohash: InfoHash,
+) -> bool {
     if state.config.load().is_connectivity_check_enabled {
         let now = Utc::now();
         let socket = SocketAddr::from((ip, port));
@@ -997,15 +1006,50 @@ async fn check_connectivity(state: &Arc<AppState>, ip: IpAddr, port: u16) -> boo
         }
 
         let connectable = tokio::spawn(async move {
-            tokio::time::timeout(
-                std::time::Duration::from_millis(500),
-                TcpStream::connect(socket),
-            )
-            .await
-            .is_ok_and(|connection_result| connection_result.is_ok())
+            let timeout = std::time::Duration::from_millis(500);
+            let mut stream = tokio::time::timeout(timeout, TcpStream::connect(socket)).await??;
+
+            // Try encrypted peer handshake first
+            // https://web.archive.org/web/20230315182724/http://wiki.vuze.com/w/Message_Stream_Encryption
+            // https://tixati.com/specs/bittorrent/peer_connections/crypto
+            let public_key: Vec<u8> = (0..96).map(|_| rng().random::<u8>()).collect();
+
+            tokio::time::timeout(timeout, stream.write_all(&public_key)).await??;
+
+            let mut buffer = vec![0u8; 1000];
+            let bytes_read = tokio::time::timeout(timeout, stream.read(&mut buffer))
+                .await
+                .map(|e| e.unwrap_or(0));
+
+            if bytes_read != Ok(0) {
+                return Ok(bytes_read.is_ok_and(|bytes_read| 96 <= bytes_read && bytes_read <= 608));
+            }
+
+            // Fallback to non-encrypted peer handshake
+            let mut stream = tokio::time::timeout(timeout, TcpStream::connect(socket)).await??;
+
+            let mut handshake = Vec::with_capacity(68);
+            handshake.extend(b"\x13BitTorrent protocol");
+            handshake.extend(b"\x00\x00\x00\x00\x00\x10\x00\x00");
+            handshake.extend(&infohash.0);
+            handshake.extend(b"-UN0310-");
+            handshake.extend((0..12).map(|_| rng().random_range(0x21..0x7e)));
+
+            tokio::time::timeout(timeout, stream.write_all(&handshake)).await??;
+
+            let mut buffer = vec![0u8; 1000];
+            let bytes_read = tokio::time::timeout(timeout, stream.read(&mut buffer))
+                .await
+                .map(|e| e.unwrap_or(0));
+
+            if bytes_read != Ok(0) {
+                return Ok(bytes_read.is_ok() && buffer.starts_with(b"\x13BitTorrent protocol"));
+            }
+
+            return Err(std::io::ErrorKind::ConnectionAborted.into());
         })
         .await
-        .unwrap_or(false);
+        .is_ok_and(|res: tokio::io::Result<bool>| res.is_ok_and(|res| res));
 
         state
             .stores
